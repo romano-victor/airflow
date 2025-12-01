@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:14
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow-webserver:
+    image: apache/airflow:2.9.1
+    container_name: airflow-webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey123"
+      _PIP_ADDITIONAL_REQUIREMENTS: "sodapy pandas boto3"
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./database:/opt/airflow/plugins/database
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.1
+    container_name: airflow-scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_started
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey123"
+      _PIP_ADDITIONAL_REQUIREMENTS: "sodapy pandas boto3"
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./database:/opt/airflow/plugins/database
+    command: scheduler
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: python-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      S3_ENDPOINT: http://localstack:4566
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
+    volumes:
+      - ./app:/app
+      - ./database:/app/database
+    command: ["python", "main.py"]
+
+volumes:
+  pgdata:
