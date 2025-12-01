@@ -6,19 +6,23 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
+      POSTGRES_MULTIPLE_DATABASES: airflow
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  airflow-webserver:
-    image: apache/airflow:2.9.1
-    container_name: airflow-webserver
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-init
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,34 +31,86 @@ services:
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey123"
-      _PIP_ADDITIONAL_REQUIREMENTS: "sodapy pandas boto3"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./database:/opt/airflow/plugins/database
+      - airflow-logs:/opt/airflow/logs
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true
+        echo "Airflow initialization completed"
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey123"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
     ports:
       - "8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./database:/opt/airflow/plugins/database
+      - airflow-logs:/opt/airflow/logs
     command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
 
   airflow-scheduler:
-    image: apache/airflow:2.9.1
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
     container_name: airflow-scheduler
     depends_on:
-      postgres:
-        condition: service_healthy
-      airflow-webserver:
-        condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__WEBSERVER__SECRET_KEY: "supersecretkey123"
-      _PIP_ADDITIONAL_REQUIREMENTS: "sodapy pandas boto3"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
     volumes:
       - ./dags:/opt/airflow/dags
       - ./database:/opt/airflow/plugins/database
+      - airflow-logs:/opt/airflow/logs
     command: scheduler
+    restart: always
+
+  localstack:
+      image: localstack/localstack
+      container_name: localstack
+      ports:
+        - "4566:4566"
+      environment:
+        - SERVICES=s3
+        - DEBUG=1
+      volumes:
+        - ./localstack:/var/lib/localstack
+        - /var/run/docker.sock:/var/run/docker.sock
 
   app:
     build:
@@ -64,6 +120,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      localstack:
+        condition: service_started
     environment:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
@@ -77,3 +135,5 @@ services:
 
 volumes:
   pgdata:
+  airflow-logs:
+  localstack-data:

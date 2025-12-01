@@ -4,11 +4,17 @@ USER root
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 USER airflow
 
-COPY pyproject.toml poetry.lock /opt/airflow/
+ENV PYTHONPATH="${PYTHONPATH}:/opt/airflow/plugins:/opt/airflow/dags"
 
-RUN pip install --no-cache-dir sodapy pandas boto3 psycopg[binary]
+RUN pip install --no-cache-dir \
+    sodapy \
+    pandas \
+    boto3 \
+    psycopg2-binary \
+    pydantic

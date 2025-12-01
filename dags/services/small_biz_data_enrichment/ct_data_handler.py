@@ -4,6 +4,7 @@ import io
 import os
 import logging
 import numpy as np
+import gc
 
 from sodapy import Socrata
 from time import sleep
@@ -24,7 +25,7 @@ s3 = boto3.client(
 )
 
 
-def extract_ct_data(dataset_id: str, chunk_size: int = 50000, token=None):
+def extract_ct_data(dataset_id: str, chunk_size: int = 10000, token=None):
     client = Socrata("data.ct.gov", token)
     offset = 0
     chunk_index = 0
@@ -57,54 +58,62 @@ def extract_ct_data(dataset_id: str, chunk_size: int = 50000, token=None):
 
 
 def quality_check_ct_data():
-    logger.info("Starting Data Quality Checks with Pydantic...")
+    logger.info("Starting Data Quality Checks with Pydantic (Memory Optimized)...")
 
     result = s3.list_objects_v2(Bucket="raw-ct-data", Prefix="chunks/")
     if "Contents" not in result:
         raise ValueError("DQ Failed: No data found in raw-ct-data bucket")
 
     keys = [o["Key"] for o in result["Contents"]]
-    chunks = []
+
+    valid_dfs = []  # Store only valid DataFrames, not raw dictionaries
+    total_dropped = 0
 
     for key in keys:
+        logger.info(f"Processing chunk: {key}")
+
         obj = s3.get_object(Bucket="raw-ct-data", Key=key)
-        df = pd.read_parquet(io.BytesIO(obj["Body"].read()))
-        chunks.append(df)
+        df_chunk = pd.read_parquet(io.BytesIO(obj["Body"].read()))
 
-    if not chunks:
-        raise ValueError("DQ Failed: No parquet chunks loaded")
-
-    final_df = pd.concat(chunks, ignore_index=True)
-
-    if final_df.empty:
-        raise ValueError("DQ Failed: Dataset is empty")
-
-    final_df.drop_duplicates(inplace=True)
-
-    final_df = final_df.replace({np.nan: None})
-
-    records = final_df.to_dict(orient="records")
-    valid_records = []
-    error_count = 0
-
-    for record in records:
-        try:
-            validated_record = BusinessSchema(**record)
-            valid_records.append(validated_record.model_dump())
-        except ValidationError:
-            error_count += 1
+        if df_chunk.empty:
             continue
 
-    if error_count > 0:
-        logger.warning(f"DQ Warning: Dropped {error_count} rows due to validation errors.")
+        records = df_chunk.replace({np.nan: None}).to_dict(orient="records")
 
-    if not valid_records:
-        raise ValueError("DQ Failed: All rows failed validation")
+        chunk_valid_records = []
 
-    validated_df = pd.DataFrame(valid_records)
+        for record in records:
+            try:
+                validated_record = BusinessSchema(**record)
+                chunk_valid_records.append(validated_record.model_dump())
+            except ValidationError:
+                total_dropped += 1
 
+        if chunk_valid_records:
+            valid_dfs.append(pd.DataFrame(chunk_valid_records))
+
+        del df_chunk
+        del records
+        del chunk_valid_records
+        gc.collect()
+
+    if not valid_dfs:
+        raise ValueError("DQ Failed: All rows across all chunks failed validation")
+
+    logger.warning(f"DQ Warning: Dropped {total_dropped} rows total due to validation errors.")
+
+    logger.info("Concatenating valid chunks...")
+    final_df = pd.concat(valid_dfs, ignore_index=True)
+
+    del valid_dfs
+    gc.collect()
+
+    logger.info("Dropping duplicates...")
+    final_df.drop_duplicates(inplace=True)
+
+    logger.info("Writing cleaned data to S3...")
     buffer = io.BytesIO()
-    validated_df.to_parquet(buffer, index=False)
+    final_df.to_parquet(buffer, index=False)
     buffer.seek(0)
 
     s3.put_object(
